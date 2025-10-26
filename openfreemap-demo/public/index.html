@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RouteSnapper + OpenFreeMap demo</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+    <link
+      href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+      }
+      #map {
+        position: fixed;
+        inset: 0;
+      }
+      #snap-tool {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        background: white;
+        color: black;
+        padding: 8px;
+        border-radius: 4px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      }
+      #panel {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        width: min(360px, calc(100% - 48px));
+        max-width: 400px;
+        background: rgba(255, 255, 255, 0.92);
+        color: #111;
+        padding: 16px;
+        border-radius: 8px;
+        box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      #panel h1 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+      #status {
+        border: 2px solid #666;
+        padding: 8px;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        background: #f9f9f9;
+      }
+      button {
+        font-size: 1rem;
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid #333;
+        background: white;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #eee;
+      }
+      a {
+        color: #1d4ed8;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <h1>RouteSnapper × OpenFreeMap</h1>
+      <p>
+        Use the downloader in <code>scripts/build-graph.js</code> to create a
+        <code>.snap.bin</code> for the area you want to edit. Drop the files into the
+        <code>public/</code> folder and reload this page to start snapping.
+      </p>
+      <div>
+        <button type="button" id="start">Start snapping (S)</button>
+        <button type="button" id="stop">Stop snapping</button>
+      </div>
+      <div>
+        <button type="button" id="clear">Clear captured routes</button>
+        <button type="button" id="download">Download GeoJSON</button>
+      </div>
+      <p id="status">Waiting for RouteSnapper…</p>
+      <p id="graph-info"></p>
+    </div>
+    <div id="map"></div>
+    <div id="snap-tool">Loading RouteSnapper…</div>
+    <script type="module">
+      import init, { RouteSnapper } from "https://unpkg.com/route-snapper@0.4.9/lib.js";
+
+      const params = new URLSearchParams(location.search);
+      const graphName = params.get("graph") || "liberty";
+
+      const metadata = await fetch(`./${graphName}.metadata.json`).then((resp) =>
+        resp.ok ? resp.json() : null,
+      );
+
+      const center = metadata ? [metadata.center.lon, metadata.center.lat] : [13.405, 52.52];
+      const bounds = metadata
+        ? new maplibregl.LngLatBounds(
+            [metadata.bounds.minLon, metadata.bounds.minLat],
+            [metadata.bounds.maxLon, metadata.bounds.maxLat],
+          )
+        : null;
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style: "https://tiles.openfreemap.org/styles/liberty/style.json",
+        center,
+        zoom: metadata ? 11 : 12.5,
+        hash: true,
+        doubleClickZoom: false,
+        boxZoom: false,
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+
+      await init();
+
+      const snapToolRoot = document.getElementById("snap-tool");
+      let routeSnapper;
+      try {
+        const snapBytes = await loadGraphBytes(`${graphName}.snap.bin`);
+        routeSnapper = new RouteSnapper(map, snapBytes, snapToolRoot);
+      } catch (err) {
+        const status = document.getElementById("status");
+        status.textContent = `Failed to load ${graphName}.snap.bin: ${err.message}`;
+        throw err;
+      }
+
+      const completedRoutes = { type: "FeatureCollection", features: [] };
+
+      map.on("load", () => {
+        if (bounds) {
+          map.fitBounds(bounds, { padding: 48, duration: 800 });
+          drawBoundary(bounds, metadata.radius_km);
+        }
+
+        map.addSource("finished", { type: "geojson", data: completedRoutes });
+        map.addLayer({
+          id: "finished-routes",
+          source: "finished",
+          type: "line",
+          filter: ["==", "$type", "LineString"],
+          paint: { "line-color": "#15803d", "line-width": 4 },
+        });
+        map.addLayer({
+          id: "finished-areas",
+          source: "finished",
+          type: "fill",
+          filter: ["==", "$type", "Polygon"],
+          paint: { "fill-color": "#22c55e", "fill-opacity": 0.25 },
+        });
+
+        const status = document.getElementById("status");
+        const graphInfo = document.getElementById("graph-info");
+        if (metadata) {
+          graphInfo.textContent = `Loaded ${graphName} — ${metadata.feature_count} edges, radius ${metadata.radius_km} km`;
+        } else {
+          graphInfo.textContent = `Loaded ${graphName}.snap.bin`;
+        }
+
+        snapToolRoot.addEventListener("new-route", (event) => {
+          completedRoutes.features.push(event.detail);
+          map.getSource("finished").setData(completedRoutes);
+          if (event.detail.geometry.type === "LineString") {
+            status.textContent = `Added route with length ${event.detail.properties.length_meters.toFixed(1)} m`;
+          } else {
+            status.textContent = `Added area with ${event.detail.properties.waypoints.length} waypoints`;
+          }
+        });
+        snapToolRoot.addEventListener("activate", () => {
+          status.textContent = "Snapping enabled";
+        });
+        snapToolRoot.addEventListener("no-new-route", () => {
+          status.textContent = "Last attempt produced no snapped segments";
+        });
+
+        document.getElementById("start").addEventListener("click", () => routeSnapper.start());
+        document.getElementById("stop").addEventListener("click", () => routeSnapper.stop());
+        document.getElementById("clear").addEventListener("click", () => {
+          completedRoutes.features = [];
+          map.getSource("finished").setData(completedRoutes);
+          status.textContent = "Cleared";
+        });
+        document.getElementById("download").addEventListener("click", () => {
+          downloadJSON(`${graphName}-routes.geojson`, completedRoutes);
+        });
+      });
+
+      function drawBoundary(bounds, radiusKm) {
+        const sourceId = "snap-area";
+        const circle = radiusKm ? circlePolygon(center, radiusKm, 128) : null;
+        map.addSource(sourceId, {
+          type: "geojson",
+          data: circle || boundsToPolygon(bounds),
+        });
+        map.addLayer({
+          id: "snap-area-line",
+          source: sourceId,
+          type: "line",
+          paint: { "line-color": "#2563eb", "line-width": 2, "line-dasharray": [2, 2] },
+        });
+      }
+
+      async function loadGraphBytes(filename) {
+        const resp = await fetch(`./${filename}`);
+        if (!resp.ok) {
+          throw new Error(`Could not load ${filename} (${resp.status})`);
+        }
+        return new Uint8Array(await resp.arrayBuffer());
+      }
+
+      function downloadJSON(filename, data) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function circlePolygon(centerLonLat, radiusKm, segments = 64) {
+        const [lon, lat] = centerLonLat;
+        const coords = [];
+        for (let i = 0; i <= segments; i++) {
+          const bearing = (i / segments) * 2 * Math.PI;
+          coords.push(destination(lon, lat, radiusKm, bearing));
+        }
+        return {
+          type: "Feature",
+          geometry: { type: "Polygon", coordinates: [coords] },
+        };
+      }
+
+      function boundsToPolygon(bounds) {
+        const west = bounds.getWest();
+        const east = bounds.getEast();
+        const south = bounds.getSouth();
+        const north = bounds.getNorth();
+        return {
+          type: "Feature",
+          geometry: {
+            type: "Polygon",
+            coordinates: [
+              [
+                [west, south],
+                [east, south],
+                [east, north],
+                [west, north],
+                [west, south],
+              ],
+            ],
+          },
+        };
+      }
+
+      function destination(lon, lat, distanceKm, bearing) {
+        const earthRadiusKm = 6371.0088;
+        const angDist = distanceKm / earthRadiusKm;
+        const latRad = (lat * Math.PI) / 180;
+        const lonRad = (lon * Math.PI) / 180;
+
+        const destLat = Math.asin(
+          Math.sin(latRad) * Math.cos(angDist) +
+            Math.cos(latRad) * Math.sin(angDist) * Math.cos(bearing),
+        );
+        const destLon =
+          lonRad +
+          Math.atan2(
+            Math.sin(bearing) * Math.sin(angDist) * Math.cos(latRad),
+            Math.cos(angDist) - Math.sin(latRad) * Math.sin(destLat),
+          );
+        return [(destLon * 180) / Math.PI, (destLat * 180) / Math.PI];
+      }
+    </script>
+  </body>
+</html>
