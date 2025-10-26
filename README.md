@@ -8,6 +8,10 @@ This plugin lets you draw routes and polygon areas in MapLibre GL that snap to s
 
 ![Demo](demo.gif)
 
+## OpenFreeMap demo
+
+The repository now includes [`openfreemap-demo`](openfreemap-demo/README.md), a self-contained workflow that downloads Liberty vector tiles from [OpenFreeMap](https://openfreemap.org), converts them into a RouteSnapper graph, and hosts a MapLibre demo that snaps routes against that network.
+
 ## Usage
 
 See the [user guide](user_guide.md) for full details and examples.
